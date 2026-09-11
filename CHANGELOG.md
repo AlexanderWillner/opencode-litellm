@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/yuseferi/opencode-litellm/compare/v1.0.1...v1.1.0) (2026-09-11)
+
+
+### Features
+
+* filter discovered models via includeModels/excludeModels ([#27](https://github.com/yuseferi/opencode-litellm/issues/27)) ([42c7ea7](https://github.com/yuseferi/opencode-litellm/commit/42c7ea71e33e44176d5b5b7e875a99180e646ac9)), closes [#21](https://github.com/yuseferi/opencode-litellm/issues/21)
+
 ## [1.0.1](https://github.com/yuseferi/opencode-litellm/compare/v1.0.0...v1.0.1) (2026-09-11)
 
 
