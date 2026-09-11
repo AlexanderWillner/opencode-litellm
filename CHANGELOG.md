@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/yuseferi/opencode-litellm/compare/v1.0.0...v1.0.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* TUI-safe logging via OpenCode's log API + configurable request timeout ([#26](https://github.com/yuseferi/opencode-litellm/issues/26)) ([e294071](https://github.com/yuseferi/opencode-litellm/commit/e294071fae0f4fc604be1ac76db205aab1ae96de)), closes [#15](https://github.com/yuseferi/opencode-litellm/issues/15) [#20](https://github.com/yuseferi/opencode-litellm/issues/20) [#24](https://github.com/yuseferi/opencode-litellm/issues/24)
+
 # [1.0.0](https://github.com/yuseferi/opencode-litellm/compare/v0.11.1...v1.0.0) (2026-08-31)
 
 
