@@ -4,6 +4,7 @@ import {
   checkLiteLLMHealth,
   discoverLiteLLMModelInfo,
   discoverLiteLLMModels,
+  getRequestTimeoutMs,
   normalizeBaseURL,
 } from '../utils/litellm-api'
 import {
@@ -15,12 +16,40 @@ import { getOpenCodeStoredApiKey } from '../utils/opencode-auth'
 import { readModelCache, writeModelCache, readModelCacheSavedAt } from '../utils/model-cache'
 
 const CHAT_PROVIDER_ID = 'litellm'
-// Covers the sequential 3 s health check plus the parallel 15 s
-// models/model-info fetch phase, with headroom.
-const DISCOVERY_TIMEOUT_MS = 20000
+// Covers the 3 s health check plus the parallel models/model-info fetch
+// phase, with headroom. Scales with LITELLM_REQUEST_TIMEOUT_MS so slow
+// proxies aren't cut off by the overall cap either (issue #20).
+const DISCOVERY_TIMEOUT_MS = Math.max(20000, getRequestTimeoutMs() + 5000)
 // Don't revalidate a baseURL's cache more often than this, so a burst
 // of `session.created` events can't generate repeated discovery traffic.
 const REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
+
+type LogLevel = 'info' | 'warn' | 'error' | 'debug'
+
+let logClient: PluginInput['client'] | null = null
+
+function initLogging(client: PluginInput['client']): void {
+  logClient = client
+}
+
+/**
+ * Route plugin logs through OpenCode's log API instead of stdout.
+ * console.* writes straight into the same terminal the OpenCode TUI
+ * renders in, corrupting the interface on every background refresh
+ * (issue #15); client.app.log lands in OpenCode's log files instead.
+ */
+function log(level: LogLevel, message: string): void {
+  if (logClient) {
+    void logClient.app
+      .log({ body: { service: 'opencode-litellm', level, message } })
+      .catch(() => {})
+    return
+  }
+  // No client wired up (unit tests, unusual embedders) — fall back to
+  // the console rather than silently dropping diagnostics.
+  if (level === 'info' || level === 'debug') console.log(message)
+  else console.warn(message)
+}
 
 /**
  * OpenCode invokes the `config` hook several times per run with a
@@ -218,7 +247,8 @@ async function discoverModels(
   providerId: string,
 ): Promise<Record<string, unknown> | null> {
   if (!(await checkLiteLLMHealth(baseURL, apiKey, customHeaders))) {
-    console.warn(
+    log(
+      'warn',
       `[opencode-litellm] LiteLLM appears offline or unauthorized for provider "${providerId}" at ${baseURL}`,
     )
     return null
@@ -235,9 +265,10 @@ async function discoverModels(
 
   if (modelsResult.status === 'rejected') {
     const error = modelsResult.reason
-    console.warn(
-      `[opencode-litellm] Model discovery failed for provider "${providerId}":`,
-      error instanceof Error ? error.message : String(error),
+    log(
+      'warn',
+      `[opencode-litellm] Model discovery failed for provider "${providerId}": ` +
+        (error instanceof Error ? error.message : String(error)),
     )
     return null
   }
@@ -248,14 +279,16 @@ async function discoverModels(
     infoByName = infoResult.value
   } else {
     const reason = infoResult.reason
-    console.warn(
-      `[opencode-litellm] /v1/model/info unavailable for provider "${providerId}"; non-chat model filtering will use id heuristics only:`,
-      reason instanceof Error ? reason.message : String(reason),
+    log(
+      'warn',
+      `[opencode-litellm] /v1/model/info unavailable for provider "${providerId}"; non-chat model filtering will use id heuristics only: ` +
+        (reason instanceof Error ? reason.message : String(reason)),
     )
   }
 
   if (discovered.length === 0) {
-    console.warn(
+    log(
+      'warn',
       `[opencode-litellm] LiteLLM responded for provider "${providerId}" but exposed zero models.`,
     )
     return null
@@ -284,14 +317,16 @@ async function discoverModels(
   }
 
   if (unmatched.length > 0) {
-    console.warn(
+    log(
+      'warn',
       `[opencode-litellm] /v1/model/info has no entry for ${unmatched.length} model(s) on provider "${providerId}"; ` +
         `classification uses id heuristics for: ${unmatched.slice(0, 5).join(', ')}` +
         (unmatched.length > 5 ? `, +${unmatched.length - 5} more` : ''),
     )
   }
 
-  console.log(
+  log(
+    'info',
     `[opencode-litellm] Discovered ${discovered.length} models for provider "${providerId}" from ${baseURL} ` +
       `(${Object.keys(built).length} built` +
       (skipped > 0 ? `, ${skipped} non-chat hidden` : '') +
@@ -348,7 +383,8 @@ async function backgroundRefresh(cacheKey: string): Promise<void> {
     )
     if (built && Object.keys(built).length > 0) {
       writeModelCache(cacheKey, built)
-      console.log(
+      log(
+        'info',
         `[opencode-litellm] Background-refreshed model cache for ${ctx.baseURL} (${Object.keys(built).length} models)`,
       )
     }
@@ -383,7 +419,8 @@ async function backgroundRefresh(cacheKey: string): Promise<void> {
  *   }
  * }
  */
-export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
+export const LiteLLMPlugin: Plugin = async (input: PluginInput) => {
+  initLogging(input.client)
   return {
     config: async (config: any) => {
       // Ensure the provider entry exists
@@ -451,7 +488,8 @@ export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
         }
 
         if (!baseURL) {
-          console.warn(
+          log(
+            'warn',
             `[opencode-litellm] No LiteLLM proxy found for provider "${providerId}". Configure options.baseURL or start LiteLLM on port 4000/8000/8080.`,
           )
           continue
@@ -520,7 +558,8 @@ export const LiteLLMPlugin: Plugin = async (_input: PluginInput) => {
         if (cached && Object.keys(cached).length > 0) {
           const added = mergeModels(models, cached)
           injectedModelIds.set(cacheKey, new Set(added))
-          console.log(
+          log(
+            'info',
             `[opencode-litellm] Loaded ${Object.keys(cached).length} models from cache for provider "${providerId}" (${baseURL}); refresh happens in the background on new sessions.`,
           )
           continue
