@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/yuseferi/opencode-litellm/compare/v1.1.0...v1.2.0) (2026-09-13)
+
+
+### Features
+
+* per-model capability flag overrides (`modelCapabilities`) ([#28](https://github.com/yuseferi/opencode-litellm/issues/28)) ([e14a09e](https://github.com/yuseferi/opencode-litellm/commit/e14a09e2f1fb4e5ed45ae1c3bf991dc425107e8f))
+
 # [1.1.0](https://github.com/yuseferi/opencode-litellm/compare/v1.0.1...v1.1.0) (2026-09-11)
 
 
