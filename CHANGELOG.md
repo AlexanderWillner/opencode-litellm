@@ -1,3 +1,9 @@
+## [Unreleased]
+
+### Features
+
+* add `formatModelNames` option to keep raw model ids in the picker
+
 # [1.2.0](https://github.com/yuseferi/opencode-litellm/compare/v1.1.0...v1.2.0) (2026-09-13)
 
 

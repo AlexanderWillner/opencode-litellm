@@ -81,6 +81,7 @@ interface RefreshContext {
   customHeaders?: Record<string, string>
   filters: ModelFilters
   capabilities: ModelCapabilities
+  formatModelNames: boolean
   providerId: string
 }
 const refreshContexts = new Map<string, RefreshContext>()
@@ -156,6 +157,10 @@ function readModelFilters(options: Record<string, unknown>): ModelFilters {
   }
 }
 
+function readFormatModelNames(options: Record<string, unknown>): boolean {
+  return options.formatModelNames !== false
+}
+
 /**
  * Overlay metadata onto a `/v1/models` entry in three tiers: the entry's
  * own fields win, `/v1/model/info` fills gaps (notably `mode`, which
@@ -207,17 +212,21 @@ const USD_PER_TOKEN_TO_PER_MILLION = 1_000_000
  * `opencode.json`). Returns `null` for non-chat models (embedding,
  * image, audio) — they can't be used as primary chat models and would
  * clutter the picker.
+ *
+ * Exported for tests: `formatModelNames` decides whether the display
+ * name is the prettified id or the raw `/v1/models` id verbatim.
  */
-function toConfigModel(
+export function toConfigModel(
   model: LiteLLMModel,
   info?: LiteLLMModelInfo,
+  formatModelNames = true,
 ): Record<string, unknown> | null {
   const type = categorizeModel(model)
   if (type === 'embedding' || type === 'image' || type === 'audio') {
     return null
   }
   const entry: Record<string, unknown> = {
-    name: formatModelName(model),
+    name: formatModelNames ? formatModelName(model) : model.id,
   }
   // Some deployments only report the OpenAI-style `max_tokens` total;
   // use it as the context limit when `max_input_tokens` is absent.
@@ -277,10 +286,11 @@ function toConfigModel(
  *
  * Pure with respect to plugin config: it performs the network calls,
  * classifies + formats each model, and returns a `{ id -> entry }` map.
- * The provider's `includeModels`/`excludeModels` filters and
- * `modelCapabilities` overrides are applied here (not at merge time) so
- * every path that persists or serves a cache — cold discovery and
- * background refresh — writes the same adjusted view.
+ * The provider's `includeModels`/`excludeModels` filters,
+ * `modelCapabilities` overrides and `formatModelNames` choice are
+ * applied here (not at merge time) so every path that persists or
+ * serves a cache — cold discovery and background refresh — writes the
+ * same adjusted view.
  *
  * Returns `null` when the proxy is unreachable/unauthorized or exposes
  * no models, so callers can distinguish "no data" from "empty result".
@@ -292,6 +302,7 @@ async function discoverModels(
   providerId: string,
   filters: ModelFilters = {},
   capabilities: ModelCapabilities = {},
+  formatModelNames = true,
 ): Promise<Record<string, unknown> | null> {
   if (!(await checkLiteLLMHealth(baseURL, apiKey, customHeaders))) {
     log(
@@ -363,7 +374,11 @@ async function discoverModels(
     }
     const info = infoByName?.get(model.id)
     if (infoByName && !info) unmatched.push(model.id)
-    const entry = toConfigModel(enrichModel(model, info, capabilities[model.id]), info)
+    const entry = toConfigModel(
+      enrichModel(model, info, capabilities[model.id]),
+      info,
+      formatModelNames,
+    )
     if (!entry) {
       skipped++
       continue
@@ -451,6 +466,7 @@ async function backgroundRefresh(cacheKey: string): Promise<void> {
         ctx.providerId,
         ctx.filters,
         ctx.capabilities,
+        ctx.formatModelNames,
       ),
       DISCOVERY_TIMEOUT_MS,
     )
@@ -553,6 +569,7 @@ export const LiteLLMPlugin: Plugin = async (input: PluginInput) => {
         const customHeaders = readCustomHeaders(options)
         const filters = readModelFilters(options)
         const capabilities = parseModelCapabilities(options.modelCapabilities)
+        const formatModelNames = readFormatModelNames(options)
 
         // Resolve base URL
         let baseURL: string | null = null
@@ -608,10 +625,12 @@ export const LiteLLMPlugin: Plugin = async (input: PluginInput) => {
 
         const models = actualProvider.models as Record<string, unknown>
 
-        // Identity includes the filter/capability config: those are
-        // baked into cached entries, so changing them must start a
+        // Identity includes the filter/capability/naming config: those
+        // are baked into cached entries, so changing them must start a
         // fresh discovery instead of serving the old adjusted view.
-        const cacheKey = buildCacheKey(providerId, baseURL, filters, capabilities)
+        const cacheKey = buildCacheKey(providerId, baseURL, filters, capabilities, {
+          formatModelNames,
+        })
 
         // Remember how to reach this proxy so the `event` hook can
         // revalidate its cache in the background on new sessions.
@@ -621,6 +640,7 @@ export const LiteLLMPlugin: Plugin = async (input: PluginInput) => {
           customHeaders,
           filters,
           capabilities,
+          formatModelNames,
           providerId,
         })
 
@@ -654,7 +674,15 @@ export const LiteLLMPlugin: Plugin = async (input: PluginInput) => {
         // persist for subsequent startups. Capped by a timeout so a slow
         // proxy never blocks boot.
         const built = await withTimeout(
-          discoverModels(baseURL, apiKey, customHeaders, providerId, filters, capabilities),
+          discoverModels(
+            baseURL,
+            apiKey,
+            customHeaders,
+            providerId,
+            filters,
+            capabilities,
+            formatModelNames,
+          ),
           DISCOVERY_TIMEOUT_MS,
         )
         if (built && Object.keys(built).length > 0) {
