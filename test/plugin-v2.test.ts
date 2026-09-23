@@ -95,6 +95,7 @@ describe('OpenCode 2 plugin entrypoint', () => {
         remove: vi.fn(),
       },
     }
+    const disposeTransform = vi.fn(async () => {})
     const context = {
       app: { name: 'OpenCode', version: '2.0.14', channel: 'stable' },
       options: { baseURL: 'http://127.0.0.1:44444/v1' },
@@ -102,7 +103,7 @@ describe('OpenCode 2 plugin entrypoint', () => {
         list: vi.fn(async () => ({ data: [] })),
         transform: vi.fn(async (transform: (editor: unknown) => void) => {
           transform(editor as never)
-          return { dispose: vi.fn(async () => {}) }
+          return { dispose: disposeTransform }
         }),
         reload: vi.fn(async () => {}),
       },
@@ -142,6 +143,7 @@ describe('OpenCode 2 plugin entrypoint', () => {
     })
 
     await cleanup?.()
+    expect(disposeTransform).toHaveBeenCalledOnce()
   })
 
   it('enriches a configured provider without replacing curated models', async () => {
@@ -280,6 +282,178 @@ describe('OpenCode 2 plugin entrypoint', () => {
     expect(registeredModels[1].map((model) => model.id)).toEqual([
       'anthropic/claude-3-5-sonnet',
     ])
+    await cleanup?.()
+  })
+
+  it('retries discovery and provider reload after a failed registry reload', async () => {
+    cacheDirectory = mkdtempSync(join(tmpdir(), 'opencode-litellm-retry-test-'))
+    process.env.XDG_CACHE_HOME = cacheDirectory
+    const baseURL = 'http://127.0.0.1:44446'
+    const cacheKey = buildCacheKey('litellm', baseURL, {}, {})
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 10 * 60 * 1000)
+    writeModelCache(cacheKey, { 'cached-model': { name: 'Cached Model' } })
+    dateNow.mockRestore()
+
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/v1/model/info')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: 'anthropic/claude-3-5-sonnet', object: 'model' }] }),
+        { status: 200 },
+      )
+    })
+
+    const registeredModels: Array<Array<Record<string, unknown>>> = []
+    let providerTransform: ((editor: unknown) => void) | undefined
+    const editor = {
+      list: () => [],
+      get: () => undefined,
+      add: (entry: { models: Array<Record<string, unknown>> }) => {
+        registeredModels.push(entry.models)
+      },
+      update: vi.fn(),
+      remove: vi.fn(),
+      models: {
+        set: vi.fn(),
+        update: vi.fn(),
+        remove: vi.fn(),
+      },
+    }
+    let releaseSecondSession!: () => void
+    const secondSession = new Promise<void>((resolve) => {
+      releaseSecondSession = resolve
+    })
+    const reload = vi.fn(async () => {
+      if (reload.mock.calls.length === 1) throw new Error('temporary registry failure')
+      providerTransform?.(editor)
+    })
+    const context = {
+      app: { name: 'OpenCode', version: '2.0.14', channel: 'stable' },
+      options: { baseURL: `${baseURL}/v1` },
+      provider: {
+        list: vi.fn(async () => ({ data: [] })),
+        transform: vi.fn(async (transform: (editor: unknown) => void) => {
+          providerTransform = transform
+          transform(editor)
+          return { dispose: vi.fn(async () => {}) }
+        }),
+        reload,
+      },
+      event: {
+        subscribe: () =>
+          (async function* () {
+            yield { type: 'session.created' }
+            await secondSession
+            yield { type: 'session.created' }
+          })(),
+      },
+    } as unknown as Context
+
+    const cleanup = await plugin.setup(context)
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce())
+    expect(registeredModels).toHaveLength(1)
+
+    releaseSecondSession()
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(2))
+    expect(registeredModels).toHaveLength(2)
+    expect(registeredModels[1].map((model) => model.id)).toEqual([
+      'anthropic/claude-3-5-sonnet',
+    ])
+    await cleanup?.()
+  })
+
+  it('rediscovers models with the new credential after a credential switch', async () => {
+    cacheDirectory = mkdtempSync(join(tmpdir(), 'opencode-litellm-credential-test-'))
+    process.env.XDG_CACHE_HOME = cacheDirectory
+    const baseURL = 'http://127.0.0.1:44447'
+    const cacheKey = buildCacheKey('litellm', baseURL, {}, {})
+    writeModelCache(cacheKey, { 'cached-model': { name: 'Cached Model' } })
+
+    const authorizationHeaders: string[] = []
+    globalThis.fetch = vi.fn(async (input, init) => {
+      authorizationHeaders.push(new Headers(init?.headers).get('Authorization') ?? '')
+      const url = String(input)
+      if (url.endsWith('/v1/model/info')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: 'new-model', object: 'model' }] }),
+        { status: 200 },
+      )
+    })
+
+    const configuredProvider = {
+      id: 'litellm',
+      name: 'Configured LiteLLM',
+      activation: 'enabled',
+      package: '@opencode/ai/providers/openai-compatible',
+      integrationID: 'litellm-auth',
+      settings: { baseURL: `${baseURL}/v1` },
+      headers: {},
+    }
+    let currentModels = new Map<string, Record<string, unknown>>()
+    const record = () => ({ provider: configuredProvider, models: currentModels })
+    const editor = {
+      list: () => [record()],
+      get: () => record(),
+      add: vi.fn(),
+      update: vi.fn((_id, update) => update(configuredProvider)),
+      remove: vi.fn(),
+      models: {
+        set: vi.fn((_id, models: Array<Record<string, unknown>>) => {
+          currentModels = new Map(models.map((model) => [String(model.id), model]))
+        }),
+        update: vi.fn(),
+        remove: vi.fn(),
+      },
+    }
+    let providerTransform: ((editor: unknown) => void) | undefined
+    const active = vi
+      .fn()
+      .mockResolvedValueOnce({ key: 'old-key' })
+      .mockResolvedValueOnce({ key: 'new-key' })
+    const reload = vi.fn(async () => providerTransform?.(editor))
+    const context = {
+      app: { name: 'OpenCode', version: '2.0.14', channel: 'stable' },
+      options: {},
+      provider: {
+        list: vi.fn(async () => ({ data: [configuredProvider] })),
+        transform: vi.fn(async (transform: (editor: unknown) => void) => {
+          providerTransform = transform
+          transform(editor)
+          return { dispose: vi.fn(async () => {}) }
+        }),
+        reload,
+      },
+      integration: {
+        connection: {
+          active,
+          resolve: vi.fn(async (connection: { key: string }) => ({
+            type: 'key',
+            key: connection.key,
+          })),
+        },
+      },
+      event: {
+        subscribe: () =>
+          (async function* () {
+            yield {
+              type: 'credential.switched',
+              data: { integrationID: 'litellm-auth' },
+            }
+          })(),
+      },
+    } as unknown as Context
+
+    const cleanup = await plugin.setup(context)
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(2))
+
+    expect(active).toHaveBeenCalledTimes(2)
+    expect(authorizationHeaders).toContain('Bearer new-key')
+    expect(configuredProvider.settings).toMatchObject({ apiKey: 'new-key' })
+    expect([...currentModels.keys()]).toContain('new-model')
     await cleanup?.()
   })
 })

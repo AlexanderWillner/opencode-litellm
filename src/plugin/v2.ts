@@ -42,6 +42,8 @@ interface ProviderSource {
   baseURL: string
   apiKey?: string
   customHeaders?: Record<string, string>
+  credentialReloadRequired: boolean
+  refreshRequired: boolean
   filters: ModelFilters
   capabilities: ModelCapabilities
   formatModelNames: boolean
@@ -252,6 +254,8 @@ async function makeProviderSource(
     headers: customHeaders,
     integrationID: provider?.integrationID,
     usesConnectionCredential,
+    credentialReloadRequired: false,
+    refreshRequired: false,
     baseURL,
     apiKey,
     customHeaders: Object.keys(customHeaders).length > 0 ? customHeaders : undefined,
@@ -270,43 +274,72 @@ function logInfo(message: string): void {
 async function refreshProviderSource(
   context: Context,
   source: ProviderSource,
-  inFlight: Set<string>,
+  inFlight: Map<string, Promise<void>>,
 ): Promise<void> {
-  if (inFlight.has(source.cacheKey)) return
-  const savedAt = readModelCacheSavedAt(source.cacheKey)
-  if (savedAt !== null && Date.now() - savedAt < REFRESH_MIN_INTERVAL_MS) return
-
-  inFlight.add(source.cacheKey)
-  try {
-    const entries = await withTimeout(
-      discoverModels(
-        source.baseURL,
-        source.apiKey,
-        source.customHeaders,
-        source.id,
-        source.filters,
-        source.capabilities,
-        source.formatModelNames,
-      ),
-      DISCOVERY_TIMEOUT_MS,
-    )
-    if (!entries || Object.keys(entries).length === 0) return
-
-    writeModelCache(source.cacheKey, entries)
-    const models = toProviderModels(source.id, entries)
-    if (JSON.stringify(models) === JSON.stringify(source.models)) return
-
-    source.models = models
-    await context.provider.reload()
-    logInfo(
-      `[opencode-litellm] Refreshed ${models.length} models for provider "${source.id}"; the provider registry was reloaded.`,
-    )
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    logInfo(`[opencode-litellm] Background refresh failed for provider "${source.id}": ${message}`)
-  } finally {
-    inFlight.delete(source.cacheKey)
+  const activeRefresh = inFlight.get(source.cacheKey)
+  if (activeRefresh) {
+    await activeRefresh
+    if (source.refreshRequired) await refreshProviderSource(context, source, inFlight)
+    return
   }
+
+  const savedAt = readModelCacheSavedAt(source.cacheKey)
+  if (
+    !source.refreshRequired &&
+    savedAt !== null &&
+    Date.now() - savedAt < REFRESH_MIN_INTERVAL_MS
+  ) {
+    return
+  }
+
+  const apiKey = source.apiKey
+  let refresh!: Promise<void>
+  refresh = (async () => {
+    try {
+      const entries = await withTimeout(
+        discoverModels(
+          source.baseURL,
+          apiKey,
+          source.customHeaders,
+          source.id,
+          source.filters,
+          source.capabilities,
+          source.formatModelNames,
+        ),
+        DISCOVERY_TIMEOUT_MS,
+      )
+      if (!entries || Object.keys(entries).length === 0 || apiKey !== source.apiKey) return
+
+      const models = toProviderModels(source.id, entries)
+      if (JSON.stringify(models) === JSON.stringify(source.models)) {
+        writeModelCache(source.cacheKey, entries)
+        source.refreshRequired = false
+        return
+      }
+
+      const previousModels = source.models
+      source.models = models
+      try {
+        await context.provider.reload()
+      } catch (error) {
+        source.models = previousModels
+        throw error
+      }
+
+      writeModelCache(source.cacheKey, entries)
+      source.refreshRequired = false
+      logInfo(
+        `[opencode-litellm] Refreshed ${models.length} models for provider "${source.id}"; the provider registry was reloaded.`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logInfo(`[opencode-litellm] Background refresh failed for provider "${source.id}": ${message}`)
+    } finally {
+      if (inFlight.get(source.cacheKey) === refresh) inFlight.delete(source.cacheKey)
+    }
+  })()
+  inFlight.set(source.cacheKey, refresh)
+  await refresh
 }
 
 async function refreshConnectionCredential(
@@ -329,6 +362,26 @@ async function refreshConnectionCredential(
     logInfo(`[opencode-litellm] Could not refresh credentials for provider "${source.id}": ${message}`)
     return false
   }
+}
+
+async function refreshProviderSources(
+  context: Context,
+  sources: ProviderSource[],
+  inFlight: Map<string, Promise<void>>,
+): Promise<void> {
+  const pendingCredentialReload = sources.filter((source) => source.credentialReloadRequired)
+  if (pendingCredentialReload.length > 0) {
+    try {
+      await context.provider.reload()
+      for (const source of pendingCredentialReload) source.credentialReloadRequired = false
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logInfo(`[opencode-litellm] Could not reload providers after a credential switch: ${message}`)
+      return
+    }
+  }
+
+  await Promise.all(sources.map((source) => refreshProviderSource(context, source, inFlight)))
 }
 
 const definition = Plugin.define({
@@ -364,7 +417,7 @@ const definition = Plugin.define({
       )
     }
 
-    await context.provider.transform((editor) => {
+    const providerRegistration = await context.provider.transform((editor) => {
       for (const source of sources) {
         const current = editor.get(source.id)
         if (current) {
@@ -402,23 +455,29 @@ const definition = Plugin.define({
     })
 
     const controller = new AbortController()
-    const inFlight = new Set<string>()
+    const inFlight = new Map<string, Promise<void>>()
     void (async () => {
       try {
         for await (const event of context.event.subscribe({ signal: controller.signal })) {
           if (event.type === 'credential.switched') {
-            const changed = await Promise.all(
+            const changedSources = (await Promise.all(
               sources
                 .filter((source) => source.integrationID === event.data.integrationID)
-                .map((source) => refreshConnectionCredential(context, source)),
-            )
-            if (changed.some(Boolean)) await context.provider.reload()
+                .map(async (source) =>
+                  (await refreshConnectionCredential(context, source)) ? source : undefined,
+                ),
+            )).filter((source): source is ProviderSource => source !== undefined)
+            for (const source of changedSources) {
+              source.credentialReloadRequired = true
+              source.refreshRequired = true
+            }
+            if (changedSources.length > 0) {
+              await refreshProviderSources(context, changedSources, inFlight)
+            }
             continue
           }
           if (event.type !== 'session.created') continue
-          for (const source of sources) {
-            void refreshProviderSource(context, source, inFlight)
-          }
+          void refreshProviderSources(context, sources, inFlight)
         }
       } catch (error) {
         if (controller.signal.aborted) return
@@ -427,8 +486,9 @@ const definition = Plugin.define({
       }
     })()
 
-    return () => {
+    return async () => {
       controller.abort()
+      await providerRegistration.dispose()
     }
   },
 })
