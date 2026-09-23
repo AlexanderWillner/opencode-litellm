@@ -40,30 +40,25 @@ Maintaining a `models` block in `opencode.json` for every model your LiteLLM pro
 
 ## 🚀 Quickstart
 
-```jsonc
-// Add to opencode.json — OpenCode installs the plugin from npm automatically
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-plugin-litellm@latest"],
-  "providers": {
-    "litellm": {
-      "name": "LiteLLM (proxy)",
-      "package": "@opencode/ai/providers/openai-compatible",
-      "settings": {
-        "baseURL": "http://localhost:4000/v1"
-      }
-    }
-  }
-}
-```
+After a V2-compatible release is published, install the plugin from the CLI
+and configure the shared background service. If your OpenCode 2 executable is
+named `opencode2`, use it in place of `opencode` below.
 
 ```bash
-# Start LiteLLM (if it isn't already)
-litellm --config config.yaml --port 4000
-
-# Run OpenCode — every model in your LiteLLM model_list is now available.
-opencode
+opencode plugin add opencode-plugin-litellm
+opencode service set env LITELLM_BASE_URL https://litellm.internal.example.com/v1
+opencode service set env LITELLM_API_KEY YOUR_API_KEY
 ```
+
+Then open OpenCode and select a discovered model under `litellm/...`.
+
+> **RFC status:** OpenCode 2 support is not yet included in the published npm
+> package. For now, `plugin add` installs the previous release, not this RFC
+> implementation.
+
+For a local LiteLLM proxy on port 4000, the base URL can be omitted and the
+plugin will detect it automatically. The [configuration section](#%EF%B8%8F-configuration)
+also shows how to configure a provider directly in `opencode.json`.
 
 ## 🎯 Features
 
@@ -130,15 +125,6 @@ You **do not need to list any models** — the plugin still discovers them from 
 ```
 
 That's the whole config — every model in your LiteLLM `model_list` will appear in the picker.
-
-You can also configure a remote proxy through the OpenCode 2 background service
-without adding a provider entry. The plugin creates the default `litellm`
-provider and discovers its models from these service environment variables:
-
-```bash
-opencode2 service set env LITELLM_BASE_URL https://litellm.internal.example.com/v1
-opencode2 service set env LITELLM_API_KEY YOUR_API_KEY
-```
 
 An explicit `settings.baseURL` in a LiteLLM provider takes precedence over
 `LITELLM_BASE_URL`. If neither is set, the plugin checks the usual local ports.
@@ -246,7 +232,7 @@ If your LiteLLM proxy requires a master key, expose it via either approach:
 | Config | `"settings": { "apiKey": "{env:LITELLM_API_KEY}" }` |
 | OpenCode `/connect` | Run `/connect`, search for your `litellm` provider entry, and paste the key |
 
-The env var path lets you commit `opencode.json` without leaking secrets. On OpenCode 1, `/connect` credentials are read from OpenCode's auth store (`~/.local/share/opencode/auth.json`) and applied to health checks, model discovery, and completion-time requests. OpenCode 2 users can use `settings.apiKey` with an environment substitution.
+The env var path lets you commit `opencode.json` without leaking secrets. On OpenCode 1, `/connect` credentials are read from OpenCode's auth store (`~/.local/share/opencode/auth.json`) and applied to health checks, model discovery, and completion-time requests. OpenCode 2 users can use `settings.apiKey` with an environment substitution or set `LITELLM_API_KEY` on the background service as shown in the Quickstart.
 
 ### Slow proxies (`LITELLM_REQUEST_TIMEOUT_MS`)
 
