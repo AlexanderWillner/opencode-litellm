@@ -9,12 +9,21 @@ import { buildCacheKey, writeModelCache } from '../src/utils/model-cache'
 describe('OpenCode 2 plugin entrypoint', () => {
   const originalFetch = globalThis.fetch
   const originalCacheHome = process.env.XDG_CACHE_HOME
+  const originalLiteLLMBaseURL = process.env.LITELLM_BASE_URL
+  const originalLiteLLMApiKey = process.env.LITELLM_API_KEY
+  const originalLiteLLMMasterKey = process.env.LITELLM_MASTER_KEY
   let cacheDirectory: string
 
   afterEach(() => {
     globalThis.fetch = originalFetch
     if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME
     else process.env.XDG_CACHE_HOME = originalCacheHome
+    if (originalLiteLLMBaseURL === undefined) delete process.env.LITELLM_BASE_URL
+    else process.env.LITELLM_BASE_URL = originalLiteLLMBaseURL
+    if (originalLiteLLMApiKey === undefined) delete process.env.LITELLM_API_KEY
+    else process.env.LITELLM_API_KEY = originalLiteLLMApiKey
+    if (originalLiteLLMMasterKey === undefined) delete process.env.LITELLM_MASTER_KEY
+    else process.env.LITELLM_MASTER_KEY = originalLiteLLMMasterKey
     if (cacheDirectory) rmSync(cacheDirectory, { recursive: true, force: true })
     vi.restoreAllMocks()
   })
@@ -144,6 +153,78 @@ describe('OpenCode 2 plugin entrypoint', () => {
 
     await cleanup?.()
     expect(disposeTransform).toHaveBeenCalledOnce()
+  })
+
+  it('uses service environment variables to create the default provider', async () => {
+    cacheDirectory = mkdtempSync(join(tmpdir(), 'opencode-litellm-env-test-'))
+    process.env.XDG_CACHE_HOME = cacheDirectory
+    process.env.LITELLM_BASE_URL = 'https://llm.example.com/v1'
+    process.env.LITELLM_API_KEY = 'test-env-key'
+    delete process.env.LITELLM_MASTER_KEY
+
+    const requestURLs: string[] = []
+    const authorizationHeaders: string[] = []
+    globalThis.fetch = vi.fn(async (input, init) => {
+      requestURLs.push(String(input))
+      authorizationHeaders.push(new Headers(init?.headers).get('Authorization') ?? '')
+      if (String(input).endsWith('/v1/model/info')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: 'model-from-env', object: 'model' }] }),
+        { status: 200 },
+      )
+    })
+
+    const unmarkedProvider = {
+      id: 'llm.ciss.de',
+      name: 'CISS provider',
+      activation: 'enabled',
+      package: '@opencode/ai/providers/openai-compatible',
+      settings: { baseURL: 'https://llm.example.com/v1' },
+    }
+    const registered: Array<{ info: Record<string, unknown>; models: Array<Record<string, unknown>> }> = []
+    const editor = {
+      list: () => [],
+      get: () => undefined,
+      add: (entry: { info: Record<string, unknown>; models: Array<Record<string, unknown>> }) => {
+        registered.push(entry)
+      },
+      update: vi.fn(),
+      remove: vi.fn(),
+      models: {
+        set: vi.fn(),
+        update: vi.fn(),
+        remove: vi.fn(),
+      },
+    }
+    const context = {
+      app: { name: 'OpenCode', version: '2.0.15', channel: 'stable' },
+      options: {},
+      provider: {
+        list: vi.fn(async () => ({ data: [unmarkedProvider] })),
+        transform: vi.fn(async (transform: (editor: unknown) => void) => {
+          transform(editor as never)
+          return { dispose: vi.fn(async () => {}) }
+        }),
+        reload: vi.fn(async () => {}),
+      },
+      event: { subscribe: () => (async function* () {})() },
+    } as unknown as Context
+
+    const cleanup = await plugin.setup(context)
+
+    expect(registered).toHaveLength(1)
+    expect(registered[0].info).toMatchObject({ id: 'litellm' })
+    expect(registered[0].info.settings).toMatchObject({
+      baseURL: 'https://llm.example.com/v1',
+      apiKey: 'test-env-key',
+    })
+    expect(registered[0].models.map((model) => model.id)).toContain('model-from-env')
+    expect(requestURLs).toContain('https://llm.example.com/v1/models')
+    expect(authorizationHeaders).toContain('Bearer test-env-key')
+
+    await cleanup?.()
   })
 
   it('enriches a configured provider without replacing curated models', async () => {

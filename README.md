@@ -131,6 +131,18 @@ You **do not need to list any models** — the plugin still discovers them from 
 
 That's the whole config — every model in your LiteLLM `model_list` will appear in the picker.
 
+You can also configure a remote proxy through the OpenCode 2 background service
+without adding a provider entry. The plugin creates the default `litellm`
+provider and discovers its models from these service environment variables:
+
+```bash
+opencode2 service set env LITELLM_BASE_URL https://litellm.internal.example.com/v1
+opencode2 service set env LITELLM_API_KEY YOUR_API_KEY
+```
+
+An explicit `settings.baseURL` in a LiteLLM provider takes precedence over
+`LITELLM_BASE_URL`. If neither is set, the plugin checks the usual local ports.
+
 ### OpenCode 1.18.29+
 
 The package also exposes the V1 server entrypoint for older OpenCode 1
@@ -228,6 +240,7 @@ If your LiteLLM proxy requires a master key, expose it via either approach:
 
 | Method | Example |
 |---|---|
+| Env var (base URL) | `LITELLM_BASE_URL=https://litellm.internal.example.com/v1` |
 | Env var | `export LITELLM_API_KEY=sk-...` |
 | Env var (alias) | `export LITELLM_MASTER_KEY=sk-...` |
 | Config | `"settings": { "apiKey": "{env:LITELLM_API_KEY}" }` |
