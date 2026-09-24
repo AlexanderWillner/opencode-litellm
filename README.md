@@ -324,6 +324,7 @@ Model classification (tool-call badge, attachments, reasoning, input modalities)
 - Overrides apply on top of whatever the proxy reports, with an explicit `false` winning — a flag the proxy never reported can be forced on just the same.
 - Keys are exact model ids as they appear in `/v1/models` (not globs).
 - Overridden flags flow into the picker exactly like natively reported ones, and the adjusted view is what gets persisted to the model cache.
+- When `/v1/model/info` reports no modality flags, discovered chat models are registered as text-only. This avoids OpenCode's image-capable fallback for text-only deployments; set `supports_vision: true` explicitly for a route that has a working multimodal projector.
 - Changing `modelCapabilities` (or `includeModels`/`excludeModels`) starts a fresh discovery on the next start — the cache is scoped by that config — so the picker reflects the new flags immediately.
 
 ### Keeping raw model ids in the picker (`formatModelNames`)
