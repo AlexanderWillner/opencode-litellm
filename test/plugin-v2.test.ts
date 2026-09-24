@@ -221,6 +221,9 @@ describe('OpenCode 2 plugin entrypoint', () => {
       apiKey: 'test-env-key',
     })
     expect(registered[0].models.map((model) => model.id)).toContain('model-from-env')
+    expect(registered[0].models[0]).toMatchObject({
+      capabilities: { input: ['text'], output: ['text'] },
+    })
     expect(requestURLs).toContain('https://llm.example.com/v1/models')
     expect(authorizationHeaders).toContain('Bearer test-env-key')
 

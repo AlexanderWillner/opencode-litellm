@@ -278,14 +278,13 @@ export function toConfigModel(
   if (model.supports_vision) input.push('image')
   if (model.supports_pdf_input) input.push('pdf')
   if (model.supports_audio_input) input.push('audio')
-  if (
-    input.length > 1 ||
-    model.supports_vision != null ||
-    model.supports_pdf_input != null ||
-    model.supports_audio_input != null
-  ) {
-    entry.modalities = { input, output: ['text'] }
-  }
+  // LiteLLM often omits capability flags for database-defined models.
+  // Do not omit `modalities` in that case: OpenCode's fallback for an
+  // unknown custom model includes image input, which makes text-only
+  // llama.cpp routes receive image parts and fail with "image input is
+  // not supported". Text-only is the safe default until a proxy reports
+  // a positive capability.
+  entry.modalities = { input, output: ['text'] }
   entry.variants = info?.supports_reasoning_efforts?.length
     ? Object.fromEntries(
         info.supports_reasoning_efforts.map((effort) => [

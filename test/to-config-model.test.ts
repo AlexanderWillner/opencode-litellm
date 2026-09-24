@@ -35,6 +35,13 @@ describe('toConfigModel naming (formatModelNames)', () => {
     ).toEqual({ input: ['text'], output: ['text'] })
   })
 
+  it('defaults to text-only when capability metadata is absent', () => {
+    expect(toConfigModel(model('text-only'))?.modalities).toEqual({
+      input: ['text'],
+      output: ['text'],
+    })
+  })
+
   it('leaves provider prefixes and version suffixes intact when raw', () => {
     const versioned = model('claude-opus-4-5@20251101')
     expect(toConfigModel(versioned, undefined, false)?.name).toBe(
