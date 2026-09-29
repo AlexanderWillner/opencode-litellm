@@ -1,29 +1,46 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import plugin from '../src'
 import type { Context } from '@opencode/plugin/promise/plugin'
 import { buildCacheKey, writeModelCache } from '../src/utils/model-cache'
+import { __resetOpenCodeAuthCacheForTests } from '../src/utils/opencode-auth'
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
+}
 
 describe('OpenCode 2 plugin entrypoint', () => {
   const originalFetch = globalThis.fetch
-  const originalCacheHome = process.env.XDG_CACHE_HOME
-  const originalLiteLLMBaseURL = process.env.LITELLM_BASE_URL
-  const originalLiteLLMApiKey = process.env.LITELLM_API_KEY
-  const originalLiteLLMMasterKey = process.env.LITELLM_MASTER_KEY
+  let originalCacheHome: string | undefined
+  let originalHome: string | undefined
+  let originalLiteLLMBaseURL: string | undefined
+  let originalLiteLLMApiKey: string | undefined
+  let originalLiteLLMMasterKey: string | undefined
   let cacheDirectory: string
+
+  beforeEach(() => {
+    originalCacheHome = process.env.XDG_CACHE_HOME
+    originalHome = process.env.HOME
+    originalLiteLLMBaseURL = process.env.LITELLM_BASE_URL
+    originalLiteLLMApiKey = process.env.LITELLM_API_KEY
+    originalLiteLLMMasterKey = process.env.LITELLM_MASTER_KEY
+    // Scrub ambient credentials so a developer/CI shell can't change what
+    // these tests exercise; each test opts into the env vars it needs.
+    delete process.env.LITELLM_BASE_URL
+    delete process.env.LITELLM_API_KEY
+    delete process.env.LITELLM_MASTER_KEY
+  })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
-    if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME
-    else process.env.XDG_CACHE_HOME = originalCacheHome
-    if (originalLiteLLMBaseURL === undefined) delete process.env.LITELLM_BASE_URL
-    else process.env.LITELLM_BASE_URL = originalLiteLLMBaseURL
-    if (originalLiteLLMApiKey === undefined) delete process.env.LITELLM_API_KEY
-    else process.env.LITELLM_API_KEY = originalLiteLLMApiKey
-    if (originalLiteLLMMasterKey === undefined) delete process.env.LITELLM_MASTER_KEY
-    else process.env.LITELLM_MASTER_KEY = originalLiteLLMMasterKey
+    restoreEnv('XDG_CACHE_HOME', originalCacheHome)
+    restoreEnv('HOME', originalHome)
+    restoreEnv('LITELLM_BASE_URL', originalLiteLLMBaseURL)
+    restoreEnv('LITELLM_API_KEY', originalLiteLLMApiKey)
+    restoreEnv('LITELLM_MASTER_KEY', originalLiteLLMMasterKey)
     if (cacheDirectory) rmSync(cacheDirectory, { recursive: true, force: true })
     vi.restoreAllMocks()
   })
@@ -536,8 +553,225 @@ describe('OpenCode 2 plugin entrypoint', () => {
 
     expect(active).toHaveBeenCalledTimes(2)
     expect(authorizationHeaders).toContain('Bearer new-key')
-    expect(configuredProvider.settings).toMatchObject({ apiKey: 'new-key' })
+    // The connection-managed credential is used for discovery but must not
+    // be materialized into provider settings — OpenCode injects it itself.
+    expect(configuredProvider.settings).not.toHaveProperty('apiKey')
     expect([...currentModels.keys()]).toContain('new-model')
+    await cleanup?.()
+  })
+
+  it('removes plugin-discovered models missing from a refresh while keeping curated models', async () => {
+    cacheDirectory = mkdtempSync(join(tmpdir(), 'opencode-litellm-remove-test-'))
+    process.env.XDG_CACHE_HOME = cacheDirectory
+    const baseURL = 'http://127.0.0.1:44448'
+    const cacheKey = buildCacheKey('litellm', baseURL, {}, {})
+    // Seed an old cache so the first transform adopts the cached model as
+    // plugin-owned, and the later session refresh isn't throttled.
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 10 * 60 * 1000)
+    writeModelCache(cacheKey, { 'discovered-old': { name: 'Discovered Old' } })
+    dateNow.mockRestore()
+
+    let inventory = ['discovered-old']
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/v1/model/info')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({ data: inventory.map((id) => ({ id, object: 'model' })) }),
+        { status: 200 },
+      )
+    })
+
+    const configuredProvider = {
+      id: 'litellm',
+      name: 'Configured LiteLLM',
+      activation: 'enabled',
+      package: '@opencode/ai/providers/openai-compatible',
+      settings: { baseURL: `${baseURL}/v1`, apiKey: 'test-key' },
+      headers: {},
+    }
+    let currentModels = new Map<string, Record<string, unknown>>([
+      ['curated-model', { id: 'curated-model', name: 'Curated Model' }],
+    ])
+    const record = () => ({ provider: configuredProvider, models: currentModels })
+    const editor = {
+      list: () => [record()],
+      get: () => record(),
+      add: vi.fn(),
+      update: vi.fn((_id, update) => update(configuredProvider)),
+      remove: vi.fn(),
+      models: {
+        set: vi.fn((_id, models: Array<Record<string, unknown>>) => {
+          currentModels = new Map(models.map((model) => [String(model.id), model]))
+        }),
+        update: vi.fn(),
+        remove: vi.fn(),
+      },
+    }
+    let providerTransform: ((editor: unknown) => void) | undefined
+    const reload = vi.fn(async () => providerTransform?.(editor))
+    const context = {
+      app: { name: 'OpenCode', version: '2.0.14', channel: 'stable' },
+      options: {},
+      provider: {
+        list: vi.fn(async () => ({ data: [configuredProvider] })),
+        transform: vi.fn(async (transform: (editor: unknown) => void) => {
+          providerTransform = transform
+          transform(editor)
+          return { dispose: vi.fn(async () => {}) }
+        }),
+        reload,
+      },
+      event: {
+        subscribe: () =>
+          (async function* () {
+            yield { type: 'session.created' }
+          })(),
+      },
+    } as unknown as Context
+
+    const cleanup = await plugin.setup(context)
+    expect([...currentModels.keys()]).toEqual(['curated-model', 'discovered-old'])
+
+    inventory = ['discovered-new']
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect([...currentModels.keys()]).toContain('discovered-new'))
+
+    expect([...currentModels.keys()]).not.toContain('discovered-old')
+    expect([...currentModels.keys()]).toContain('curated-model')
+    await cleanup?.()
+  })
+
+  it('does not fall back to the legacy OpenCode auth store for V2 credentials', async () => {
+    cacheDirectory = mkdtempSync(join(tmpdir(), 'opencode-litellm-legacy-auth-test-'))
+    process.env.XDG_CACHE_HOME = cacheDirectory
+    const home = mkdtempSync(join(tmpdir(), 'opencode-litellm-home-'))
+    process.env.HOME = home
+    const authDirectory = join(home, '.local', 'share', 'opencode')
+    mkdirSync(authDirectory, { recursive: true })
+    writeFileSync(
+      join(authDirectory, 'auth.json'),
+      JSON.stringify({ litellm: { type: 'api', key: 'legacy-stored-key' } }),
+    )
+    __resetOpenCodeAuthCacheForTests()
+
+    const baseURL = 'http://127.0.0.1:44449'
+    const authorizationHeaders: string[] = []
+    globalThis.fetch = vi.fn(async (input, init) => {
+      authorizationHeaders.push(new Headers(init?.headers).get('Authorization') ?? '')
+      const url = String(input)
+      if (url.endsWith('/v1/model/info')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: 'public-model', object: 'model' }] }),
+        { status: 200 },
+      )
+    })
+
+    const configuredProvider = {
+      id: 'litellm',
+      name: 'Configured LiteLLM',
+      activation: 'enabled',
+      package: '@opencode/ai/providers/openai-compatible',
+      settings: { baseURL: `${baseURL}/v1` },
+      headers: {},
+    }
+    const editor = {
+      list: () => [],
+      get: () => undefined,
+      add: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      models: { set: vi.fn(), update: vi.fn(), remove: vi.fn() },
+    }
+    const context = {
+      app: { name: 'OpenCode', version: '2.0.14', channel: 'stable' },
+      options: {},
+      provider: {
+        list: vi.fn(async () => ({ data: [configuredProvider] })),
+        transform: vi.fn(async (transform: (editor: unknown) => void) => {
+          transform(editor as never)
+          return { dispose: vi.fn(async () => {}) }
+        }),
+        reload: vi.fn(async () => {}),
+      },
+      event: { subscribe: () => (async function* () {})() },
+    } as unknown as Context
+
+    const cleanup = await plugin.setup(context)
+
+    expect(editor.add).toHaveBeenCalledOnce()
+    expect(configuredProvider.settings).not.toHaveProperty('apiKey')
+    expect(authorizationHeaders.length).toBeGreaterThan(0)
+    expect(authorizationHeaders.every((header) => header === '')).toBe(true)
+
+    await cleanup?.()
+  })
+
+  it('uses a connection-managed credential for discovery without materializing it', async () => {
+    cacheDirectory = mkdtempSync(join(tmpdir(), 'opencode-litellm-managed-test-'))
+    process.env.XDG_CACHE_HOME = cacheDirectory
+    const baseURL = 'http://127.0.0.1:44450'
+
+    const authorizationHeaders: string[] = []
+    globalThis.fetch = vi.fn(async (input, init) => {
+      authorizationHeaders.push(new Headers(init?.headers).get('Authorization') ?? '')
+      const url = String(input)
+      if (url.endsWith('/v1/model/info')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: 'managed-model', object: 'model' }] }),
+        { status: 200 },
+      )
+    })
+
+    const configuredProvider = {
+      id: 'litellm',
+      name: 'Configured LiteLLM',
+      activation: 'enabled',
+      package: '@opencode/ai/providers/openai-compatible',
+      integrationID: 'litellm-auth',
+      settings: { baseURL: `${baseURL}/v1` },
+      headers: {},
+    }
+    const editor = {
+      list: () => [],
+      get: () => undefined,
+      add: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      models: { set: vi.fn(), update: vi.fn(), remove: vi.fn() },
+    }
+    const context = {
+      app: { name: 'OpenCode', version: '2.0.14', channel: 'stable' },
+      options: {},
+      provider: {
+        list: vi.fn(async () => ({ data: [configuredProvider] })),
+        transform: vi.fn(async (transform: (editor: unknown) => void) => {
+          transform(editor as never)
+          return { dispose: vi.fn(async () => {}) }
+        }),
+        reload: vi.fn(async () => {}),
+      },
+      integration: {
+        connection: {
+          active: vi.fn(async () => ({ key: 'managed-key' })),
+          resolve: vi.fn(async (connection: { key: string }) => ({
+            type: 'key',
+            key: connection.key,
+          })),
+        },
+      },
+      event: { subscribe: () => (async function* () {})() },
+    } as unknown as Context
+
+    const cleanup = await plugin.setup(context)
+
+    expect(authorizationHeaders).toContain('Bearer managed-key')
+    expect(configuredProvider.settings).not.toHaveProperty('apiKey')
     await cleanup?.()
   })
 })

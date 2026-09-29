@@ -12,7 +12,6 @@ import {
   withTimeout,
   LiteLLMPlugin,
 } from './index'
-import { getOpenCodeStoredApiKey } from '../utils/opencode-auth'
 import {
   buildCacheKey,
   readModelCache,
@@ -49,6 +48,12 @@ interface ProviderSource {
   formatModelNames: boolean
   cacheKey: string
   models: Model.Info[]
+  /**
+   * Model ids this plugin injected into the provider registry (as opposed
+   * to ids the user curated in config). Only these are eligible to be
+   * removed when a later refresh no longer discovers them.
+   */
+  ownedModelIds: Set<string>
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -139,16 +144,39 @@ function numberOrDefault(value: unknown, fallback: number): number {
     : fallback
 }
 
+/**
+ * Merge freshly discovered models into a provider's current model set.
+ *
+ * Previously-discovered ids owned by this plugin are replaced/removed so a
+ * refresh reflects LiteLLM's current inventory; ids the user curated
+ * themselves are never removed. Returns the merged list plus the set of
+ * ids the plugin now owns.
+ */
 function mergeProviderModels(
   configured: Iterable<Model.Info>,
   discovered: readonly Model.Info[],
-): Model.Info[] {
+  owned: ReadonlySet<string>,
+): { models: Model.Info[]; owned: Set<string> } {
+  const discoveredIds = new Set(discovered.map((model) => model.id))
   const result = new Map<string, Model.Info>()
-  for (const model of configured) result.set(model.id, model)
-  for (const model of discovered) {
-    if (!result.has(model.id)) result.set(model.id, model)
+  const nextOwned = new Set<string>()
+
+  for (const model of configured) {
+    // Drop plugin-injected models that LiteLLM no longer returns; curated
+    // models are not in `owned`, so they always survive.
+    if (owned.has(model.id) && !discoveredIds.has(model.id)) continue
+    result.set(model.id, model)
+    if (owned.has(model.id)) nextOwned.add(model.id)
   }
-  return [...result.values()]
+
+  for (const model of discovered) {
+    if (!result.has(model.id)) {
+      result.set(model.id, model)
+      nextOwned.add(model.id)
+    }
+  }
+
+  return { models: [...result.values()], owned: nextOwned }
 }
 
 function runtimeSettings(source: ProviderSource): Record<string, unknown> {
@@ -168,7 +196,11 @@ function runtimeSettings(source: ProviderSource): Record<string, unknown> {
     delete settings[key]
   }
   settings.baseURL = `${source.baseURL}/v1`
-  if (source.apiKey) settings.apiKey = source.apiKey
+  // Connection-managed credentials are resolved only for discovery. They
+  // must not be materialized into provider settings: OpenCode owns
+  // credential injection for integrated providers. Explicit credentials
+  // (provider settings, plugin options, env) still flow through.
+  if (source.apiKey && !source.usesConnectionCredential) settings.apiKey = source.apiKey
   return settings
 }
 
@@ -204,10 +236,7 @@ async function makeProviderSource(
     process.env.LITELLM_API_KEY ??
     process.env.LITELLM_MASTER_KEY
   const usesConnectionCredential = !configuredApiKey && Boolean(provider?.integrationID)
-  const apiKey =
-    configuredApiKey ??
-    connectedApiKey ??
-    (await getOpenCodeStoredApiKey(id))
+  const apiKey = configuredApiKey ?? connectedApiKey
   const filters = readModelFilters(settings)
   const capabilities = parseModelCapabilities(settings.modelCapabilities)
   const formatModelNames = readFormatModelNames(settings)
@@ -264,6 +293,7 @@ async function makeProviderSource(
     formatModelNames,
     cacheKey,
     models: toProviderModels(id, entries ?? {}),
+    ownedModelIds: new Set<string>(),
   }
 }
 
@@ -428,17 +458,23 @@ const definition = Plugin.define({
               ...(provider.settings ?? {}),
               ...runtimeSettings(source),
             }
-            if (source.usesConnectionCredential && !source.apiKey) delete settings.apiKey
+            // Integration-managed credentials never belong in settings,
+            // even if a stale apiKey was materialized there previously.
+            if (source.usesConnectionCredential) delete settings.apiKey
             provider.settings = settings
             if (Object.keys(source.headers).length > 0) {
               provider.headers = { ...provider.headers, ...source.headers }
             }
           })
-          editor.models.set(
-            source.id,
-            mergeProviderModels(current.models.values(), source.models),
+          const merged = mergeProviderModels(
+            current.models.values(),
+            source.models,
+            source.ownedModelIds,
           )
+          source.ownedModelIds = merged.owned
+          editor.models.set(source.id, merged.models)
         } else {
+          source.ownedModelIds = new Set(source.models.map((model) => model.id))
           editor.add({
             info: {
               ...Provider.Info.empty(Provider.ID.make(source.id)),
