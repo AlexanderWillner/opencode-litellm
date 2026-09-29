@@ -6,10 +6,10 @@
 
 # opencode-litellm
 
-**Native [OpenCode 2](https://opencode.ai) + [LiteLLM](https://github.com/BerriAI/litellm) provider with zero configuration.**
+**[OpenCode V1 + V2](https://opencode.ai) + [LiteLLM](https://github.com/BerriAI/litellm) provider with zero configuration.**
 
 [![Works with OpenCode](https://img.shields.io/badge/works%20with-OpenCode-7C5CFF?style=flat-square)](https://opencode.ai)
-[![OpenCode V2](https://img.shields.io/badge/OpenCode%20V2-supported-16A34A?style=flat-square)](https://opencode.ai)
+[![OpenCode V1 + V2](https://img.shields.io/badge/OpenCode%20V1%20%2B%20V2-supported-16A34A?style=flat-square)](https://opencode.ai)
 [![Powered by LiteLLM](https://img.shields.io/badge/powered%20by-LiteLLM-22D3EE?style=flat-square)](https://github.com/BerriAI/litellm)
 
 [![npm version](https://img.shields.io/npm/v/opencode-plugin-litellm.svg?style=flat-square&color=cb3837&logo=npm)](https://www.npmjs.com/package/opencode-plugin-litellm)
@@ -31,10 +31,10 @@ Auto-detect a running LiteLLM proxy, pull every model from `/v1/models`, and reg
 > **npm package:** `opencode-plugin-litellm` &nbsp;·&nbsp; **GitHub repo:** `yuseferi/opencode-litellm`
 > The unscoped `opencode-litellm` npm name was already taken by another author.
 
-> **✅ OpenCode V2 support:** Native `Plugin.define`, provider-registry model
-> discovery, and in-process refresh are supported and validated against
-> OpenCode **2.0.19**. OpenCode 1.18.29+ remains supported through the legacy
-> server entrypoint.
+> **✅ OpenCode V1 + V2 support:** OpenCode **2.0.19** uses native
+> `Plugin.define`, provider-registry model discovery, and in-process refresh.
+> OpenCode **1.18.29+** uses the legacy `server()` entrypoint. Both versions
+> are supported by this package.
 
 ---
 
@@ -84,7 +84,7 @@ also shows how to configure a provider directly in `opencode.json`.
 | ⏱️ **Bounded startup** | Health checks fail fast (3 s); discovery fetches are capped at **15 s** (configurable via `LITELLM_REQUEST_TIMEOUT_MS`) for slow remote proxies. V2 model refresh runs in the background. |
 | 📝 **OpenCode logging** | V1 logs go through OpenCode's log API; V2 logs use the V2 plugin host's console logging. |
 | 🤝 **Non-destructive merge** | Only adds models you don't already have configured. Hand-curated entries are preserved verbatim. |
-| 🔌 **OpenCode V2 native** | Uses OpenCode 2's `Plugin.define`, provider transforms, event subscription, and live model refresh. OpenCode 1.18.29+ remains supported through the legacy server entrypoint. |
+| 🔌 **OpenCode V1 + V2** | Supports OpenCode 2's native `Plugin.define`, provider transforms, event subscription, and live model refresh, plus the OpenCode 1.18.29+ legacy `server()` entrypoint. |
 | 🔒 **TypeScript strict** | Strict-mode compiled, fully typed public API. |
 
 ## ⚙️ Configuration
